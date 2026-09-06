@@ -1,79 +1,101 @@
 # FastAPI User Auth System
 
-基于 **FastAPI** 与 **MySQL** 的用户认证与授权系统，支持双 Token（JWT）认证、刷新轮换与 Redis 黑名单撤销，以及用户-角色-权限的通用 RBAC。
+基于 **FastAPI + MySQL + Redis** 的异步用户认证与授权系统：OAuth2 密码表单登录、双 Token（JWT）认证、刷新轮换防重放、Redis 黑名单即时撤销，以及用户-角色-权限的通用 RBAC。
 
-## 项目目标
+## 目录
 
-- 用户注册与登录（OAuth2 密码表单）
-- 双 Token：短时 Access Token + 长时 Refresh Token
-- 刷新轮换：每次刷新签发新令牌对并撤销旧 Refresh Token，防重放
-- 登出撤销：将 Token 的 `jti` 写入 Redis 黑名单（TTL = 令牌剩余寿命）
-- 通用 RBAC：用户-角色-权限关联与细粒度权限点校验
-- 异步数据库访问（SQLAlchemy 2.0 + asyncmy）与 Alembic 迁移
+- [功能特性](#功能特性)
+- [技术栈](#技术栈)
+- [快速开始](#快速开始)
+- [环境变量](#环境变量)
+- [Docker 部署（可选）](#docker-部署可选)
+- [认证机制（双 Token 与撤销）](#认证机制双-token-与撤销)
+- [权限管理（RBAC）](#权限管理rbac)
+- [API 一览与调用示例](#api-一览与调用示例)
+- [数据库迁移（Alembic）](#数据库迁移alembic)
+- [项目结构与架构](#项目结构与架构)
+- [运行测试](#运行测试)
+
+## 功能特性
+
+- 用户注册与登录（OAuth2 Password Flow，`username` 即邮箱）
+- 双 Token 认证：**Access Token**（默认 30 分钟）访问业务接口，**Refresh Token**（默认 7 天）仅用于换发新令牌
+- 刷新轮换防重放：每次 `POST /auth/refresh` 撤销旧 Refresh Token 并签发新令牌对，重放旧 Token 立即返回 401
+- 登出即时撤销：Token 的 `jti` 写入 Redis 黑名单（TTL = 令牌剩余寿命），无需手动清理
+- 通用 RBAC：用户-角色-权限五表关联，权限点细粒度校验，角色/权限变更实时生效
+- 全异步 I/O：SQLAlchemy 2.0 + asyncmy，Alembic 管理迁移
+- 开箱即用：开发环境启动自动建表并幂等写入默认角色；Docker Compose 一键拉起应用 + MySQL 8.4 + Redis 7
+- 测试零依赖：pytest + 内存 SQLite（aiosqlite）+ fakeredis，无需启动 MySQL / Redis
 
 ## 技术栈
 
-- **FastAPI** — Web 框架
-- **SQLAlchemy 2.0（异步）+ asyncmy** — ORM 与 MySQL 异步驱动
-- **Alembic** — 数据库迁移
-- **Pydantic / pydantic-settings** — 数据校验与配置管理
-- **python-jose** — JWT 签发与校验
-- **passlib[bcrypt] + bcrypt** — 密码哈希
-- **Redis（redis-py asyncio）** — Token 黑名单存储
-- **pytest + httpx + pytest-asyncio** — 接口测试
-- **uvicorn** — ASGI 服务器
-
-## 数据库
-
-本项目使用 **MySQL** 作为数据库，通过 `asyncmy` 异步驱动连接，连接串由环境变量 `DATABASE_URL` 配置；Token 黑名单存储在 **Redis**，地址由 `REDIS_URL` 配置。
-
-## 环境变量
-
-复制 `.env.example` 为 `.env` 并按需修改：
-
-```bash
-DATABASE_URL=mysql+asyncmy://root:password@localhost:3306/fastapi_user
-SECRET_KEY=your-secret-key-here-change-in-production
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-REFRESH_TOKEN_EXPIRE_DAYS=7
-REDIS_URL=redis://localhost:6379/0
-```
+| 分类 | 选型 |
+| --- | --- |
+| Web 框架 | FastAPI + uvicorn |
+| 数据库 / 驱动 | MySQL 8.x + asyncmy（异步） |
+| ORM / 迁移 | SQLAlchemy 2.0（async）+ Alembic |
+| 校验 / 配置 | Pydantic 2 + pydantic-settings |
+| 认证 / 密码 | python-jose（JWT）、passlib[bcrypt] |
+| 黑名单存储 | Redis（redis-py asyncio） |
+| 测试 | pytest + pytest-asyncio + httpx、aiosqlite + fakeredis |
 
 ## 快速开始
 
-```bash
-# 1. 创建并激活虚拟环境
-python -m venv .venv
-source .venv/bin/activate
+环境要求：Python 3.10+，本机可用的 MySQL 与 Redis（仅跑测试则都不需要）。
 
-# 2. 安装依赖（含开发/测试依赖）
+```bash
+# 1. 准备数据库（MySQL 需先启动；utf8mb4 保证中文等字符完整存储）
+mysql -uroot -p -e "CREATE DATABASE IF NOT EXISTS fastapi_user CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+
+# 2. 创建并激活虚拟环境，安装依赖（含测试依赖）
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements-dev.txt
 
-# 3. 配置环境变量
+# 3. 从模板生成配置，并按需修改数据库口令、SECRET_KEY 等
 cp .env.example .env
 
-# 4. 启动 Redis（黑名单需要；无 Redis 时测试会用 fakeredis 替代）
-redis-server
+# 4. 启动 Redis（Token 黑名单依赖；只跑测试可跳过）
+redis-server --daemonize yes
 
-# 5. 启动开发服务器（首次启动会自动创建数据库表并写入默认角色）
+# 5. 启动开发服务器（首次启动自动建表并写入默认 RBAC 角色）
 uvicorn app.main:app --reload
 ```
 
-> 说明：开发环境下，应用在启动时会通过 `Base.metadata.create_all` 自动创建数据表并幂等写入默认 RBAC 种子；生产环境请使用 Alembic 迁移。
+启动后访问：
+
+- 根路径：http://localhost:8000/ （健康检查）
+- 交互式 API 文档：http://localhost:8000/docs （Swagger UI）或 http://localhost:8000/redoc
+
+> 说明：开发环境在启动时通过 `Base.metadata.create_all` 自动建表，并调用 `seed_rbac`（`app/services/rbac_service.py`）幂等写入默认角色与权限；生产环境请改用 Alembic 迁移（见下文）。
+
+## 环境变量
+
+配置通过 pydantic-settings 从 `.env` 或环境变量读取（`.env.example` 含全部变量与默认值）。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DATABASE_URL` | `mysql+asyncmy://root:password@localhost:3306/fastapi_user` | MySQL 异步连接串 |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis 地址（Token 黑名单） |
+| `SECRET_KEY` | `your-secret-key-here-change-in-production` | JWT 签名密钥，**生产环境必须修改** |
+| `ALGORITHM` | `HS256` | JWT 签名算法 |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | Access Token 有效期（分钟） |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Refresh Token 有效期（天） |
+| `MYSQL_ROOT_PASSWORD` | `changeme` | 仅 Docker 部署使用：MySQL root 密码 |
+| `MYSQL_DATABASE` | `fastapi_user` | 仅 Docker 部署使用：自动创建的数据库名 |
 
 ## Docker 部署（可选）
 
-项目自带 `Dockerfile` 与 `docker-compose.yml`，一条命令即可启动 **FastAPI 应用 + MySQL 8.4 + Redis 7**：
+仓库内置 `Dockerfile` 与 `docker-compose.yml`，一条命令即可启动 **应用 + MySQL 8.4 + Redis 7**：
 
 ```bash
-# 启动（首次会自动构建镜像）
+# 构建并启动（首次会自动构建镜像）
 docker compose up -d --build
 
-# 查看启动日志
+# 查看应用日志
 docker compose logs -f app
 
-# API 文档
+# 交互式 API 文档
 open http://localhost:8000/docs
 
 # 停止服务（保留 MySQL 数据卷）
@@ -83,149 +105,200 @@ docker compose down
 docker compose down -v
 ```
 
-说明：
+默认行为与说明：
 
-- `app` 容器启动时自动执行 `alembic upgrade head` 后再启动 `uvicorn`，无需手动迁移
-- `db`（MySQL）与 `redis` 服务均带健康检查，`app` 会等它们就绪后再启动
-- MySQL 数据持久化在 `mysql_data` 卷中；`db` 端口默认**不映射到宿主机**，避免与本机 MySQL 冲突，如需宿主机直连可自行添加 `ports: - "3306:3306"`
-- `app` 容器内的 `REDIS_URL=redis://redis:6379/0` 指向 compose 的 `redis` 服务，无需额外配置
-- 可用环境变量覆盖默认值（不设置时默认：`MYSQL_ROOT_PASSWORD=changeme`、`MYSQL_DATABASE=fastapi_user`），例如：
+- `app` 启动前自动执行 `alembic upgrade head` 再启动 `uvicorn`，无需手动迁移
+- MySQL 与 Redis 均配置健康检查，`app` 会等它们就绪后才启动
+- MySQL 数据持久化在 `mysql_data` 卷；`db` 端口默认**不映射到宿主机**（避免与本机 MySQL 冲突），如需宿主机直连可自行添加 `ports: - "3306:3306"`
+- 容器内 `REDIS_URL=redis://redis:6379/0` 自动指向 compose 的 Redis 服务，无需额外配置
+- 支持用环境变量覆盖默认值，例如：
   ```bash
   MYSQL_ROOT_PASSWORD=your-db-pass SECRET_KEY=your-secret docker compose up -d --build
   ```
-- 生产环境务必通过环境变量覆盖 `SECRET_KEY` 等敏感配置，不要使用默认值
+- 生产环境务必通过环境变量覆盖 `SECRET_KEY`、`MYSQL_ROOT_PASSWORD` 等敏感配置，不要使用默认值
 
-## 双 Token 与撤销（Redis 黑名单）
+## 认证机制（双 Token 与撤销）
 
-JWT 的 Payload 统一包含 `sub`（用户 id）、`type`（`access` / `refresh`）、`jti`（唯一 id）与 `exp`：
+JWT Payload 统一包含 `sub`（用户 id）、`type`（`access` / `refresh`）、`jti`（唯一标识）与 `exp`（过期时间）。
 
-- **Access Token**：默认 30 分钟有效，用于调用受保护接口（`Authorization: Bearer <token>`）
-- **Refresh Token**：默认 7 天有效，只能用于 `/auth/refresh` 换取新的令牌对，不能访问业务接口
+- **Access Token**：调用受保护接口，通过请求头携带 `Authorization: Bearer <access_token>`
+- **Refresh Token**：只能用于 `POST /auth/refresh` 换发新令牌对，不能访问业务接口
 
-撤销机制：
+令牌生命周期：
 
-- `POST /auth/refresh`：校验 Refresh Token 后，先将其 `jti` 写入 Redis 黑名单（TTL = 剩余寿命），再签发新的令牌对。旧 Refresh Token 一旦被重放，立即返回 401
-- `POST /auth/logout`：将当前 Access Token 的 `jti` 写入黑名单；请求体可携带 `refresh_token` 一并撤销
-- `get_current_user` 在每次鉴权时先解码校验签名，再检查 `jti` 是否在黑名单中
-- Redis 键格式：`token:blacklist:<jti>`，天然自动过期，无需手动清理
+1. **登录** `POST /auth/login`：校验邮箱密码后签发令牌对，返回 `{access_token, refresh_token, token_type: "bearer"}`
+2. **访问**：`get_current_user` 解码校验签名，确认 `type=access` 且 `jti` 不在黑名单，再实时加载用户与权限
+3. **刷新** `POST /auth/refresh`：校验 Refresh Token 后，先将其 `jti` 写入黑名单（TTL = 剩余寿命），再签发新令牌对；旧 Token 被重放立即返回 401
+4. **登出** `POST /auth/logout`：将当前 Access Token 的 `jti` 写入黑名单；请求体可携带 `refresh_token` 一并撤销
 
-测试环境无需真实 Redis：`tests/conftest.py` 用 `fakeredis` 覆盖 `get_redis` 依赖。
+实现要点：
 
-## 数据库迁移（Alembic）
-
-生产环境建议使用 Alembic 管理数据库结构，迁移脚本位于 `alembic/versions/`。
-
-```bash
-# 应用迁移到数据库
-alembic upgrade head
-
-# 模型变更后生成新的迁移脚本（需要可连接的数据库）
-alembic revision --autogenerate -m "describe the change"
-
-# 回滚最近一次迁移
-alembic downgrade -1
-
-# 查看迁移历史与当前版本
-alembic history
-alembic current
-```
-
-连接串统一从 `.env` 中的 `DATABASE_URL` 读取，由 `app/config.py` 注入到 Alembic。
-
-## 分层架构
-
-项目按 **routers（路由）/ schemas（数据校验）/ models（数据库模型）/ services（业务逻辑）** 四层组织，依赖方向自上而下单向：
-
-```text
-HTTP 请求
-   │
-   ▼
-┌─────────────────────────────────────────────┐
-│ routers/   HTTP 层：参数解析、鉴权依赖、状态码   │
-│   deps.py     get_current_user / require_   │
-│   auth.py     permission 等共享依赖           │
-│   users.py                                  │
-└───────────────┬─────────────────────────────┘
-                │ 调用 services，捕获业务异常并转 HTTPException
-                ▼
-┌─────────────────────────────────────────────┐
-│ schemas/  Pydantic 层：请求/响应 DTO 与校验    │
-│   auth.py  user.py  role.py                 │
-└───────────────┬─────────────────────────────┘
-                │（DTO 由路由层构造/校验）
-                ▼
-┌─────────────────────────────────────────────┐
-│ services/  业务层：用例编排、规则、事务边界      │
-│   auth_service.py   注册/登录/刷新/登出        │
-│   user_service.py   用户 CRUD/角色分配/软删除  │
-│   token_service.py  JWT 签发/解码/撤销        │
-│   rbac_service.py   权限判定/种子数据          │
-│   errors.py         业务异常（路由层转 HTTP）  │
-└───────────────┬─────────────────────────────┘
-                │ 通过 SQLAlchemy 异步会话访问数据
-                ▼
-┌─────────────────────────────────────────────┐
-│ models/   ORM 层：表结构与关系                │
-│   user.py  role.py  permission.py           │
-│   associations.py   user_roles/role_perms   │
-└───────────────┬─────────────────────────────┘
-                ▼
-   database.py（engine/会话） + core/（security/redis 基础设施）
-```
-
-分层规则：
-
-- **routers** 只做 HTTP 翻译：解析 `schemas` DTO、声明 `Depends` 鉴权、调用 `services`，把业务异常映射为 `HTTPException`，不写 SQL
-- **schemas** 只做数据校验与序列化，不含业务逻辑
-- **services** 承载业务规则（邮箱唯一、默认角色、刷新轮换、软删除等），不感知 `Request/Response/HTTPException`
-- **models** 只定义表结构与关系，不包含查询逻辑之外的业务
-- 依赖只允许“上层 → 下层”，禁止反向引用；`services` 之间可互相调用（如 `auth_service` → `user_service`）
+- Redis 黑名单键格式：`token:blacklist:<jti>`，随 TTL 自动过期，无需手动清理
+- 每次鉴权都会先检查黑名单，登出 / 刷新后的原 Token 立即失效
+- 测试环境由 `tests/conftest.py` 用 `fakeredis` 覆盖 `get_redis` 依赖，无需真实 Redis
 
 ## 权限管理（RBAC）
 
-采用用户-角色-权限五表关联模型：
+采用用户-角色-权限五表模型：`users`、`roles`、`permissions` 三张实体表，`user_roles`、`role_permissions` 两张关联表（外键级联删除）。
 
-- `users`、`roles`、`permissions` 三张实体表
-- `user_roles`、`role_permissions` 两张关联表（外键级联删除）
-
-默认角色与权限（由迁移脚本与 `app/core/rbac.py` 幂等种子写入）：
+默认角色与权限（由 Alembic 迁移脚本与启动时的 `seed_rbac` 幂等写入）：
 
 | 角色 | 权限 |
 | --- | --- |
 | `admin` | `user:list`、`user:delete`、`role:assign` |
-| `user` | 无 |
+| `user` | （无） |
 
-鉴权方式：路由通过 `Depends(require_permission("user:list"))` 等声明所需权限；
-`require_permission` 在 `app/routers/deps.py` 中声明，由 `app/services/rbac_service.py` 按“用户 → 角色 → 权限”实时查库校验，未授权返回 403。
+鉴权方式：
 
-相关 API：
+- 用户注册时自动获得 `user` 角色
+- 路由通过 `Depends(require_permission("user:list"))` 声明所需权限
+- `require_permission` 在 `app/routers/deps.py` 中定义，由 `app/services/rbac_service.py` 按 “用户 → 角色 → 权限” **实时查库**校验，未授权返回 403
+- JWT 仅含用户 id，角色与权限每次请求实时读取，改角色或软删除用户即刻生效
+
+角色管理 API：
 
 - `POST /users/assign-role`：为用户分配角色（需 `role:assign`）
 - `DELETE /users/{user_id}/roles/{role_name}`：移除用户角色（需 `role:assign`）
 
-用户注册时自动获得 `user` 角色；JWT 中仅含用户 id，角色与权限每次请求实时读取，改角色或软删除即刻生效。
-
-## 主要 API
+## API 一览与调用示例
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `POST` | `/auth/register` | 注册（默认分配 `user` 角色） |
-| `POST` | `/auth/login` | OAuth2 密码表单登录，返回双 Token |
+| `POST` | `/auth/register` | 注册（默认分配 `user` 角色，201） |
+| `POST` | `/auth/login` | OAuth2 表单登录（`username` = 邮箱），返回双 Token |
 | `POST` | `/auth/refresh` | 用 Refresh Token 刷新并轮换令牌对 |
-| `POST` | `/auth/logout` | 登出，撤销当前 Token（可带 refresh_token） |
+| `POST` | `/auth/logout` | 登出，撤销当前 Access Token（可带 `refresh_token`） |
 | `GET` | `/users/me` | 当前用户信息 |
-| `PUT` | `/users/me` | 更新当前用户 `full_name` |
+| `PUT` | `/users/me` | 更新当前用户资料（仅 `full_name`） |
 | `GET` | `/users` | 用户列表（需 `user:list`） |
 | `POST` | `/users/assign-role` | 分配角色（需 `role:assign`） |
+| `DELETE` | `/users/{user_id}/roles/{role_name}` | 移除角色（需 `role:assign`） |
 | `DELETE` | `/users/{user_id}` | 软删除用户（需 `user:delete`） |
+
+普通用户流程示例：
+
+```bash
+# 注册
+curl -s -X POST http://localhost:8000/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email": "alice@example.com", "password": "secret123", "full_name": "Alice"}'
+
+# 登录（OAuth2 密码表单，返回 access_token 与 refresh_token）
+curl -s -X POST http://localhost:8000/auth/login \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'username=alice@example.com&password=secret123'
+
+# 把上一步返回的令牌填入变量（也可用 jq 自动提取）
+export ACCESS_TOKEN='<access_token>'
+export REFRESH_TOKEN='<refresh_token>'
+
+# 携带 Access Token 访问受保护接口
+curl -s http://localhost:8000/users/me \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+
+# 刷新令牌对（旧 Refresh Token 随即失效）
+curl -s -X POST http://localhost:8000/auth/refresh \
+  -H 'Content-Type: application/json' \
+  -d "{\"refresh_token\": \"$REFRESH_TOKEN\"}"
+
+# 登出（撤销 Access Token，并可选一并撤销 Refresh Token）
+curl -s -X POST http://localhost:8000/auth/logout \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"refresh_token\": \"$REFRESH_TOKEN\"}"
+```
+
+管理员操作示例（需先注册/登录具备 `admin` 角色的账号）：
+
+```bash
+# 为用户分配 admin 角色（需 role:assign）
+curl -s -X POST http://localhost:8000/users/assign-role \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id": "<用户 UUID>", "role_name": "admin"}'
+```
+
+## 数据库迁移（Alembic）
+
+开发环境启动时自动建表并写入种子数据；**生产环境请使用 Alembic** 管理数据库结构，迁移脚本位于 `alembic/versions/`：
+
+```bash
+alembic upgrade head    # 应用全部迁移到最新版本
+alembic revision --autogenerate -m "describe the change"  # 按模型差异生成迁移（需可连接的数据库）
+alembic downgrade -1    # 回滚最近一次迁移
+alembic history         # 查看迁移历史
+alembic current         # 查看当前版本
+```
+
+Alembic 连接串通过 `app/config.py` 从 `.env` 的 `DATABASE_URL` 注入（见 `alembic/env.py`），无需单独维护 `alembic.ini` 中的数据库地址。
+
+## 项目结构与架构
+
+项目按 **routers（HTTP）/ schemas（DTO）/ services（业务）/ models（ORM）** 分层，依赖方向自上而下单向：
+
+```text
+HTTP 请求（携带 Authorization: Bearer <access_token>）
+   │
+   ▼
+routers/   HTTP 层：参数解析、鉴权依赖、状态码、异常映射
+   │  deps.py       get_current_user / require_permission
+   │  auth.py       注册、登录、刷新、登出
+   │  users.py      当前用户资料与用户管理
+   │
+   ▼ 调用 services，业务异常 → HTTPException
+schemas/   Pydantic 层：请求/响应 DTO 与校验（不含业务逻辑）
+   │
+   ▼
+services/  业务层：用例编排、业务规则、事务边界
+   │  auth_service.py    注册 / 登录 / 令牌轮换 / 登出
+   │  user_service.py    用户 CRUD / 角色分配 / 软删除
+   │  token_service.py   JWT 签发 / 解码 / 撤销
+   │  rbac_service.py    权限判定 / 幂等种子数据
+   │  errors.py          业务异常定义
+   │
+   ▼ 通过 SQLAlchemy 异步会话访问数据
+models/    ORM 层：表结构与关系
+   │  user.py / role.py / permission.py / associations.py
+   │
+   ▼
+database.py（engine / session）+ core/（security、redis 基础设施）
+```
+
+分层规则：
+
+- **routers** 只做 HTTP 翻译：解析/构造 `schemas` DTO、声明 `Depends` 鉴权、调用 `services`，并把业务异常映射为 `HTTPException`，不写 SQL
+- **schemas** 只做数据校验与序列化，不含业务逻辑
+- **services** 承载业务规则（邮箱唯一、默认角色、刷新轮换、软删除等），不感知 `Request` / `Response` / `HTTPException`
+- **models** 只定义表结构与关系
+- 依赖只允许 “上层 → 下层”，禁止反向引用；`services` 之间可互相调用（如 `auth_service` → `user_service`）
+
+目录结构：
+
+```text
+.
+├── app/
+│   ├── main.py            应用入口：注册路由、启动建表 + RBAC 种子
+│   ├── config.py          pydantic-settings 配置（读取 .env / 环境变量）
+│   ├── database.py        异步 engine、会话与 get_db 依赖
+│   ├── core/              基础设施：security.py（密码哈希）、redis.py（黑名单）
+│   ├── models/            SQLAlchemy 模型：user / role / permission / associations
+│   ├── schemas/           Pydantic DTO：auth / user / role
+│   ├── routers/           API 路由与鉴权依赖（deps.py）
+│   └── services/          业务逻辑：auth / user / token / rbac + errors
+├── alembic/               数据库迁移（versions/ 存放迁移脚本）
+├── tests/                 pytest 集成测试（aiosqlite + fakeredis）
+├── Dockerfile             生产镜像（启动时自动 alembic upgrade head）
+├── docker-compose.yml     app + MySQL 8.4 + Redis 7
+├── requirements.txt       运行时依赖
+└── requirements-dev.txt   开发与测试依赖
+```
 
 ## 运行测试
 
-测试基于 `pytest-asyncio` 与 `httpx.AsyncClient`，使用内存 SQLite（`aiosqlite`）作为独立测试库，
-并以 `fakeredis` 替代真实 Redis，无需启动 MySQL 或 Redis。每个测试用例会创建独立的内存数据库，结束后自动清理，互不影响。
+测试基于 `pytest-asyncio` 与 `httpx.AsyncClient`：每个用例创建独立的内存 SQLite 数据库（`aiosqlite`），用 `fakeredis` 替代真实 Redis，结束后自动清理、互不影响，**无需启动 MySQL 或 Redis**。
 
 ```bash
-# 安装测试依赖（已在 requirements-dev.txt 中）
+# 安装依赖（已包含测试依赖）
 pip install -r requirements-dev.txt
 
 # 运行全部测试
