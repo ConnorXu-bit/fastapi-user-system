@@ -75,14 +75,25 @@ uvicorn app.main:app --reload
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
+| `ENV` | `development` | 运行环境；设为 `production` 时强制校验 `SECRET_KEY` |
 | `DATABASE_URL` | `mysql+asyncmy://root:password@localhost:3306/fastapi_user` | MySQL 异步连接串 |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis 地址（Token 黑名单） |
-| `SECRET_KEY` | `your-secret-key-here-change-in-production` | JWT 签名密钥，**生产环境必须修改** |
+| `SECRET_KEY` | `your-secret-key-here-change-in-production` | JWT 签名密钥；`ENV=production` 时必须是**非占位值且长度 ≥ 32** |
 | `ALGORITHM` | `HS256` | JWT 签名算法 |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `30` | Access Token 有效期（分钟） |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Refresh Token 有效期（天） |
 | `MYSQL_ROOT_PASSWORD` | `changeme` | 仅 Docker 部署使用：MySQL root 密码 |
 | `MYSQL_DATABASE` | `fastapi_user` | 仅 Docker 部署使用：自动创建的数据库名 |
+
+**密钥校验（fail fast）**：当 `ENV=production` 且 `SECRET_KEY` 仍是文档里的占位值、或长度不足
+32 位时，应用会在**启动阶段**直接抛出校验错误，而不是用一个人人皆知的密钥悄悄对外服务。
+生成方式：
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+开发环境不拦截，保持开箱即用。
 
 ## Docker 部署（可选）
 
