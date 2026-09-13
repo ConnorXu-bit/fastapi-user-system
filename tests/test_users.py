@@ -85,7 +85,7 @@ async def test_list_users_admin_only(client, db_engine):
     admin_token = await create_admin(client, db_engine, email="admin2@example.com")
     allowed = await client.get("/users", headers=auth(admin_token))
     assert allowed.status_code == 200
-    emails = {u["email"] for u in allowed.json()}
+    emails = {u["email"] for u in allowed.json()["items"]}
     assert "admin2@example.com" in emails
     assert "normal@example.com" in emails
 
@@ -197,6 +197,52 @@ async def test_remove_role_user_not_found(client, db_engine):
         f"/users/{uuid.uuid4()}/roles/admin", headers=auth(admin_token)
     )
     assert response.status_code == 404
+
+
+async def test_list_users_pagination(client, db_engine):
+    """分页返回数据与总数，且两页之间不重叠。"""
+    admin_token = await create_admin(client, db_engine, email="page-admin@example.com")
+    for i in range(3):
+        await register(client, f"page{i}@example.com")
+
+    first = (await client.get("/users?limit=2&offset=0", headers=auth(admin_token))).json()
+    assert first["total"] == 4          # 管理员 1 + 普通用户 3
+    assert first["limit"] == 2 and first["offset"] == 0
+    assert len(first["items"]) == 2
+
+    second = (await client.get("/users?limit=2&offset=2", headers=auth(admin_token))).json()
+    assert len(second["items"]) == 2
+    assert {u["id"] for u in first["items"]}.isdisjoint({u["id"] for u in second["items"]})
+
+    # 越界返回空列表而不是报错
+    beyond = (await client.get("/users?offset=99", headers=auth(admin_token))).json()
+    assert beyond["items"] == []
+    assert beyond["total"] == 4
+
+
+async def test_list_users_filter_by_is_active(client, db_engine):
+    """默认返回全部（含停用），显式传 is_active 才过滤。"""
+    admin_token = await create_admin(client, db_engine, email="filter-admin@example.com")
+    victim = await register(client, "filter-victim@example.com")
+    await client.delete(f"/users/{victim['id']}", headers=auth(admin_token))
+
+    default = (await client.get("/users", headers=auth(admin_token))).json()
+    assert "filter-victim@example.com" in {u["email"] for u in default["items"]}
+
+    inactive = (await client.get("/users?is_active=false", headers=auth(admin_token))).json()
+    assert inactive["total"] == 1
+    assert inactive["items"][0]["email"] == "filter-victim@example.com"
+
+    active = (await client.get("/users?is_active=true", headers=auth(admin_token))).json()
+    assert "filter-victim@example.com" not in {u["email"] for u in active["items"]}
+
+
+async def test_list_users_rejects_invalid_pagination(client, db_engine):
+    """limit / offset 越界由 FastAPI 校验，避免一次拉走全表。"""
+    admin_token = await create_admin(client, db_engine, email="invalid-admin@example.com")
+    for query in ("limit=0", "limit=1000", "offset=-1"):
+        response = await client.get(f"/users?{query}", headers=auth(admin_token))
+        assert response.status_code == 422, query
 
 
 async def test_remove_role_role_not_found(client, db_engine):

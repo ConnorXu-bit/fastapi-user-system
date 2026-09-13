@@ -181,10 +181,24 @@ JWT Payload 统一包含 `sub`（用户 id）、`type`（`access` / `refresh`）
 | `POST` | `/auth/logout` | 登出，撤销当前 Access Token（可带 `refresh_token`） |
 | `GET` | `/users/me` | 当前用户信息 |
 | `PUT` | `/users/me` | 更新当前用户资料（仅 `full_name`） |
-| `GET` | `/users` | 用户列表（需 `user:list`） |
+| `GET` | `/users` | 用户列表，分页 + 可选按启用状态过滤（需 `user:list`） |
 | `POST` | `/users/assign-role` | 分配角色（需 `role:assign`） |
 | `DELETE` | `/users/{user_id}/roles/{role_name}` | 移除角色（需 `role:assign`） |
 | `DELETE` | `/users/{user_id}` | 软删除用户（需 `user:delete`） |
+
+**`GET /users` 的分页与过滤**：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `limit` | `20` | 每页条数，范围 1–100（越界返回 422，避免一次拉走全表） |
+| `offset` | `0` | 偏移量，必须 ≥ 0 |
+| `is_active` | 不传 | 不传返回全部（含已停用）；传 `true` / `false` 按启用状态过滤 |
+
+响应为分页外壳 `{ items, total, limit, offset }`，`total` 是满足条件的总数，便于前端算页数。
+
+**为什么默认不过滤已停用用户**：这是管理端接口，停用（软删除）的目的是保留数据以便审计和
+恢复。如果默认把停用账号藏起来，管理员"删除"之后就再也看不到它，也就无法恢复——那和物理
+删除没有区别了。需要只看启用用户时显式传 `is_active=true` 即可。
 
 普通用户流程示例：
 

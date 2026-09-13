@@ -3,13 +3,16 @@
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_password_hash
 from app.models import Role, User
 from app.models.role import ROLE_USER
 from app.services import errors
+
+DEFAULT_PAGE_SIZE = 20
+MAX_PAGE_SIZE = 100
 
 
 async def get_user_by_email(db: AsyncSession, email: str) -> Optional[User]:
@@ -24,10 +27,31 @@ async def get_user_by_id(db: AsyncSession, user_id: UUID) -> Optional[User]:
     return result.scalar_one_or_none()
 
 
-async def list_users(db: AsyncSession) -> list[User]:
-    """按创建时间倒序返回全部用户。"""
-    result = await db.execute(select(User).order_by(User.created_at.desc()))
-    return list(result.scalars().all())
+async def list_users(
+    db: AsyncSession,
+    *,
+    is_active: Optional[bool] = None,
+    limit: int = DEFAULT_PAGE_SIZE,
+    offset: int = 0,
+) -> tuple[list[User], int]:
+    """按创建时间倒序分页返回用户，并返回满足条件的总数。
+
+    is_active 为 None 时不过滤：管理端默认需要看到全貌，包括已停用账号——
+    否则停用之后用户就从列表里消失了，既无法审计也无法恢复。
+    """
+    stmt = select(User)
+    count_stmt = select(func.count()).select_from(User)
+    if is_active is not None:
+        stmt = stmt.where(User.is_active == is_active)
+        count_stmt = count_stmt.where(User.is_active == is_active)
+
+    total = await db.scalar(count_stmt)
+    # 排序键必须唯一（created_at 可能相同），否则翻页时同一条记录可能
+    # 重复出现或被跳过。
+    result = await db.execute(
+        stmt.order_by(User.created_at.desc(), User.id).limit(limit).offset(offset)
+    )
+    return list(result.scalars().all()), int(total or 0)
 
 
 async def create_user(
