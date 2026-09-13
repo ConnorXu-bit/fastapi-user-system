@@ -187,7 +187,7 @@ async def test_soft_delete_by_admin(client, db_engine):
     assert response.json()["message"] == "User deactivated"
 
     response = await client.get("/users/me", headers=auth(victim_token))
-    assert response.status_code == 400
+    assert response.status_code == 403
     assert response.json()["detail"] == "Inactive user"
 
 

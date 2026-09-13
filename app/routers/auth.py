@@ -39,9 +39,15 @@ async def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ) -> Token:
-    user = await auth_service.authenticate_user(
-        db, form_data.username, form_data.password
-    )
+    try:
+        user = await auth_service.authenticate_user(
+            db, form_data.username, form_data.password
+        )
+    except errors.InactiveUserError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled",
+        )
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

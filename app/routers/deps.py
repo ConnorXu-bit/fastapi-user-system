@@ -55,7 +55,7 @@ async def get_current_active_user(
     """校验当前用户处于激活状态。"""
     if not current_user.is_active:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Inactive user"
+            status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user"
         )
     return current_user
 
@@ -77,7 +77,7 @@ def require_permission(permission_name: str):
 
     async def checker(
         db: AsyncSession = Depends(get_db),
-        current_user: User = Depends(get_current_user),
+        current_user: User = Depends(get_current_active_user),
     ) -> User:
         if not await rbac_service.user_has_permission(db, current_user, permission_name):
             raise HTTPException(

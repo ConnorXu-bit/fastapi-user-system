@@ -30,10 +30,16 @@ async def register_user(db: AsyncSession, payload: UserCreate) -> User:
 async def authenticate_user(
     db: AsyncSession, email: str, password: str
 ) -> Optional[User]:
-    """按邮箱查询用户并验证密码，成功返回用户，失败返回 None。"""
+    """按邮箱查询用户并验证密码，成功返回用户，失败返回 None。
+
+    密码正确但账号已停用时抛 InactiveUserError——必须在密码校验之后判断，
+    否则等于给攻击者提供了一个"这个邮箱是否存在"的探针。
+    """
     user = await user_service.get_user_by_email(db, email)
     if user is None or not verify_password(password, user.hashed_password):
         return None
+    if not user.is_active:
+        raise errors.InactiveUserError()
     return user
 
 

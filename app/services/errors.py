@@ -9,6 +9,10 @@ class EmailAlreadyRegisteredError(ServiceError):
     """注册邮箱已存在。"""
 
 
+class InactiveUserError(ServiceError):
+    """账号已被停用（软删除），不允许换取新令牌。"""
+
+
 class UserNotFoundError(ServiceError):
     """用户不存在。"""
 
