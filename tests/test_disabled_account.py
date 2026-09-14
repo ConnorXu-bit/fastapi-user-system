@@ -32,4 +32,6 @@ async def test_inactive_user_cannot_use_existing_token(client, db_engine):
 
     response = await client.get("/users", headers=auth(token))
 
-    assert response.status_code in (401, 403)
+    # 走的是 require_permission -> get_current_active_user，固定返回 403。
+    # 断言写死一个值，将来谁把依赖改回不查 is_active 的版本，这个测试会立刻变红。
+    assert response.status_code == 403
